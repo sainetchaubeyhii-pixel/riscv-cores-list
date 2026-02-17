@@ -1,0 +1,359 @@
+//  parametrizable_ram 
+module parametrizable_ram #(parameter addr_width = 4,
+                            parameter data_width = 32,
+                            parameter depth = 16)(
+                            
+                            input logic clk,rst_n,wrt_enb,
+                            input logic [addr_width - 1:0]addr,
+                            input logic [data_width - 1:0]wdata,
+                            output logic [data_width - 1:0]rdata
+                            );
+                            
+logic [data_width - 1:0]mem[0:depth - 1];
+
+//rst condition 
+always_ff@(posedge clk)
+begin
+if(!rst_n)
+begin
+rdata <= 0;
+end
+
+else begin
+if(wrt_enb)
+mem[addr] <= wdata;
+else
+rdata <= mem[addr];
+end
+end
+
+endmodule
+
+
+// AXI4 Lite protocol 
+
+module axi_lite_protocol #(parameter addr_width = 32,
+                            parameter data_width = 32,
+                            parameter depth = 16)(
+                            input logic aclk,
+                            input logic arstn,
+                            
+                            //write address channel 
+                            input logic [addr_width - 1:0] s_axi_awaddr, // we will provide it by testbench
+                            input logic s_axi_awvalid,
+                            output logic s_axi_awready,
+                            
+                            //write data channel
+                            input logic [data_width - 1:0]s_axi_wdata,
+                            input logic s_axi_wvalid,
+                            output logic s_axi_wready,
+                            
+                            //write response channel
+                            output logic [1:0] bresp,
+                            output logic bvalid,
+                            input logic bready,
+                            
+                            //read data channel
+                            output logic [data_width - 1:0] s_axi_rdata,
+                            output logic [1:0] rresp,
+                            output logic s_axi_rvalid,
+                            input logic s_axi_rready,
+                            
+                            //read addr channel
+                            input logic [addr_width - 1:0] s_axi_araddr,
+                            input logic s_axi_arvalid,
+                            output logic s_axi_arready
+                            );
+                            
+    localparam resp_okay = 2'b00;
+    localparam resp_slverr = 2'b10;
+    
+    
+    //state machine parameters
+    localparam idle = 2'b00;
+    localparam write = 2'b01;
+    localparam read = 2'b10;
+    localparam resp = 2'b11;
+    
+    //internal signals 
+    logic [1:0] wr_state,rd_state;
+    logic [addr_width  - 1:0] wr_addr_reg,rd_addr_reg;
+    
+    //ram interface signals
+    logic ram_write_enable;
+    logic [addr_width - 1:0] ram_addr;
+    logic [data_width - 1:0] ram_write_data;
+    logic [data_width - 1:0] ram_rdata;
+    
+    //instantiating the ram
+    
+    parametrizable_ram dut(
+    .clk(aclk),
+    .rst_n(arstn),
+    .wrt_enb(ram_write_enable),
+    .addr(ram_addr),
+    .wdata(ram_write_data),
+    .rdata(ram_rdata)
+    );
+    
+    //write address channel
+    always_ff@(posedge aclk)
+    begin
+    if(!arstn)
+    begin
+    s_axi_awready <= 1'b0;
+    wr_addr_reg <= {addr_width{1'b0}};
+    wr_state <= idle;
+    end
+    
+    case (wr_state)
+    idle : begin
+    s_axi_awready <= 1'b1;
+    if(s_axi_awvalid && s_axi_awready) begin
+    wr_addr_reg <= s_axi_awaddr;
+    s_axi_awready <= 0;
+    wr_state <= write;
+    end
+    end
+    
+    
+    write : begin 
+    if(s_axi_wvalid && s_axi_wready)
+    wr_state <= resp;
+    end
+    
+    resp : begin 
+    if(bvalid && bready)
+    wr_state <= idle;
+    end
+      default : wr_state <= idle;
+    endcase
+    end
+    
+    // write data channel
+    
+    always_ff@(posedge aclk)
+    begin
+    if(!arstn)
+    begin
+    s_axi_wready <= 1'b0;
+    ram_write_enable <= 1'b0;
+    ram_write_data <= {addr_width{1'b0}};
+    end
+    
+    else 
+    begin
+if (wr_state == write) begin
+  s_axi_wready <= 1'b1;
+  if (s_axi_wvalid) begin
+    ram_write_enable <= 1'b1;
+    ram_addr <= wr_addr_reg;
+    ram_write_data <= s_axi_wdata;
+  end
+end
+
+   
+   else 
+   s_axi_wready <= 1'b0;
+   end
+   end
+    //write resp channel
+    
+       always_ff@(posedge aclk)
+    begin
+    if(!arstn)
+    begin
+    bvalid <= 1'b0;
+    bresp <= 1'b0;
+    end
+    
+    else 
+    begin
+    if(wr_state == resp)begin
+    bvalid <=1'b1;
+    bresp <= resp_okay;
+   end
+   else if(bvalid && bready)
+   bvalid <= 1'b0;
+   end
+    end
+    
+    //read addresss channel
+    always_ff @(posedge aclk) begin
+  if (!arstn) begin
+    rd_addr_reg <= 1'b0;
+    rd_state <= idle;
+  end else begin
+    case (rd_state)
+      idle: begin
+        if (s_axi_arvalid && s_axi_arready) begin
+          rd_addr_reg <= s_axi_araddr; // ✅ ARADDR is now CONNECTED
+          rd_state <= read;
+        end
+      end
+
+      read: begin
+        rd_state <= resp;
+      end
+
+      resp: begin
+        if (s_axi_rvalid && s_axi_rready)
+          rd_state <= idle;
+      end
+    endcase
+  end
+end
+
+//
+always_ff @(posedge aclk) begin
+  if (!arstn) begin
+    s_axi_rvalid <= 1'b0;
+    s_axi_rdata  <= '0;
+    rresp <= 2'b00;
+  end else begin
+    if (rd_state == resp) begin
+      s_axi_rvalid <= 1'b1;
+      s_axi_rdata  <= ram_rdata; // RAM data at ARADDR
+      rresp <= resp_okay;
+    end else if (s_axi_rvalid && s_axi_rready) begin
+      s_axi_rvalid <= 1'b0;
+    end
+  end
+end
+
+    
+//assign ram_addr = rd_addr_reg;
+
+endmodule
+
+
+
+// TESTBENCH
+
+module testbench_axi_lite;
+                            parameter addr_width = 32;
+                            parameter data_width = 32;
+                            parameter depth = 16;
+                            logic aclk;
+                            logic arstn;
+                            logic [addr_width - 1:0] s_axi_awaddr;
+                            logic s_axi_awvalid;
+                            logic s_axi_awready;
+                            logic [data_width - 1:0]s_axi_wdata;
+                            logic s_axi_wvalid;
+                            logic s_axi_wready;
+                            logic [1:0] bresp;
+                            logic bvalid;
+                            logic bready;
+                            logic [data_width - 1:0] s_axi_rdata;
+                            logic [1:0] rresp;
+                            logic s_axi_rvalid;
+                            logic s_axi_rready;
+                            logic [addr_width - 1:0] s_axi_araddr;
+                            logic s_axi_arvalid;
+                            logic s_axi_arready;
+                            
+axi_lite_protocol dut(
+  .aclk (aclk),
+  .arstn (arstn),
+  .s_axi_awaddr (s_axi_awaddr),
+  .s_axi_awvalid (s_axi_awvalid),
+  .s_axi_awready (s_axi_awready),
+  .s_axi_wdata (s_axi_wdata),
+  .s_axi_wvalid (s_axi_wvalid),
+  .s_axi_wready  (s_axi_wready),
+  .bresp (bresp),
+  .bvalid (bvalid),
+  .bready  (bready),
+  .s_axi_rdata   (s_axi_rdata),
+  .rresp (rresp),
+  .s_axi_rvalid  (s_axi_rvalid),
+  .s_axi_rready  (s_axi_rready),
+  .s_axi_araddr  (s_axi_araddr),
+  .s_axi_arvalid (s_axi_arvalid),
+  .s_axi_arready (s_axi_arready)
+);
+
+initial
+begin
+{s_axi_awaddr,s_axi_awvalid,s_axi_wdata,s_axi_wvalid,bready,s_axi_rready,s_axi_araddr,s_axi_arvalid} = 0;
+end
+
+initial
+begin 
+aclk = 0;
+forever #5 aclk = ~aclk;
+end
+
+
+initial
+begin
+arstn = 1'b0;
+s_axi_awaddr = 0;
+s_axi_awvalid = 0;
+s_axi_wdata = 0;
+s_axi_wvalid = 0;
+bready = 0;
+s_axi_arready = 0;
+s_axi_araddr = 0;
+s_axi_arvalid = 0;
+
+  #20;
+  arstn = 1;
+
+  // WRITE 1
+s_axi_awaddr = 32'h00000004;
+  s_axi_awvalid = 1;
+  s_axi_wdata   = 32'hDEADBEEF;
+  s_axi_wvalid  = 1;
+  bready        = 1;
+
+  #20;
+  s_axi_awvalid = 0;
+  s_axi_wvalid  = 0;
+
+  #40;
+  bready = 0;
+
+
+ // WRITE 2
+  #20;
+s_axi_awaddr = 32'h00000008;
+
+
+  s_axi_awvalid = 1;
+  s_axi_wdata   = 32'hDEADBEEE;
+  s_axi_wvalid  = 1;
+  bready        = 1;
+
+  #20;
+  s_axi_awvalid = 1;
+  s_axi_wvalid  = 1;
+  #40;
+  bready = 1;
+
+  #200;
+  
+  arstn = 0;
+  #10;
+//
+arstn = 1;
+s_axi_araddr  = 32'h00000004;   // same address you wrote
+s_axi_arvalid = 1'b1;
+s_axi_rready  = 1'b1;
+
+wait (s_axi_arready == 1'b1);
+@(posedge aclk);
+s_axi_arvalid = 1'b0;
+
+wait (s_axi_rvalid == 1'b1);
+$display("READ DATA = %0h", s_axi_rdata);
+
+@(posedge aclk);
+s_axi_rready = 1'b0;
+#1000;
+
+$finish;
+end
+
+endmodule
